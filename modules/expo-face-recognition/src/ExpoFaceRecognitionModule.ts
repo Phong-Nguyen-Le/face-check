@@ -26,6 +26,7 @@ export type RecognizeResult = {
 export type EnrolledFaceEntry = {
   name: string;
   enrolledAt: number; // unix timestamp
+  embeddingCount: number;
 };
 
 type ExpoFaceRecognitionModule = {
@@ -33,6 +34,8 @@ type ExpoFaceRecognitionModule = {
   isModelLoaded(): boolean;
   detectFacesAsync(imageUri: string): Promise<FaceDetectionResult>;
   enrollFaceAsync(imageUri: string, name: string): Promise<EnrollResult>;
+  addFaceEmbeddingAsync(imageUri: string, name: string): Promise<EnrollResult>;
+  captureFrameAsync(): Promise<string>;
   recognizeFaceAsync(imageUri: string): Promise<RecognizeResult>;
   listEnrolledFaces(): EnrolledFaceEntry[];
   removeEnrolledFace(name: string): void;

@@ -20,6 +20,9 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
   private var lastDetectionTime: CFTimeInterval = 0
   private let detectionInterval: CFTimeInterval = 0.1
 
+  // MARK: – Frame store throttle (~5 fps for captureFrameAsync)
+  private var lastFrameStoreTime: CFTimeInterval = 0
+
   // MARK: – Recognition cache (~1 fps)
   private var cachedNames: [String] = []
   private var lastRecognitionTime: CFTimeInterval = 0
@@ -80,7 +83,7 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
     session.commitConfiguration()
 
     previewLayer = AVCaptureVideoPreviewLayer(session: session)
-    previewLayer.videoGravity = .resizeAspectFill
+    previewLayer.videoGravity = .resizeAspect
     DispatchQueue.main.async { self.layer.addSublayer(self.previewLayer) }
 
     sessionQueue.async { self.session.startRunning() }
@@ -97,6 +100,15 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
     lastDetectionTime = now
 
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+    // Keep a fresh frame available for captureFrameAsync (~5 fps)
+    if now - lastFrameStoreTime >= 0.2 {
+      lastFrameStoreTime = now
+      let storeCi = CIImage(cvPixelBuffer: pixelBuffer)
+      if let storeCg = ciContext.createCGImage(storeCi, from: storeCi.extent) {
+        FrameStore.shared.update(UIImage(cgImage: storeCg))
+      }
+    }
 
     // Snapshot for async recognition (lightweight, done before Vision request)
     let shouldRecognize = MobileFaceNetService.shared.isModelLoaded
@@ -139,7 +151,7 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
         }
       }
 
-      // Build face payload with cached names
+      // Build face payload with cached names + yaw for guided enrollment
       let faces: [[String: Any]] = observations.enumerated().map { (i, obs) in
         let bb = obs.boundingBox
         return [
@@ -148,6 +160,7 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
           "width":  bb.width,
           "height": bb.height,
           "name":   i < self.cachedNames.count ? self.cachedNames[i] : "",
+          "yaw":    obs.yaw?.floatValue ?? 0,
         ]
       }
 
@@ -162,6 +175,7 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
   }
 
   // MARK: – Crop face from UIImage using Vision normalized bbox
+
   private func cropFace(image: UIImage, observation: VNFaceObservation) -> UIImage? {
     guard let cgImage = image.cgImage else { return nil }
     let w = CGFloat(cgImage.width)
@@ -180,5 +194,25 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
 
     guard let cropped = cgImage.cropping(to: rect) else { return nil }
     return UIImage(cgImage: cropped)
+  }
+}
+
+// MARK: - FrameStore (shared storage for captureFrameAsync)
+
+final class FrameStore {
+  static let shared = FrameStore()
+  private let lock = NSLock()
+  private var _image: UIImage?
+
+  private init() {}
+
+  func update(_ image: UIImage) {
+    lock.lock(); defer { lock.unlock() }
+    _image = image
+  }
+
+  func take() -> UIImage? {
+    lock.lock(); defer { lock.unlock() }
+    return _image
   }
 }

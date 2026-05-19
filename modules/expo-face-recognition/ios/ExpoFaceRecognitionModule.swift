@@ -94,6 +94,31 @@ public class ExpoFaceRecognitionModule: Module {
       return ["success": ok, "name": name]
     }
 
+    AsyncFunction("addFaceEmbeddingAsync") { (imageUri: String, name: String) async throws -> [String: Any] in
+      let image = try Self.loadImage(from: imageUri)
+      let ok = try await MobileFaceNetService.shared.addEmbedding(image: image, name: name)
+      return ["success": ok, "name": name]
+    }
+
+    AsyncFunction("captureFrameAsync") { () async throws -> String in
+      guard let image = FrameStore.shared.take() else {
+        throw NSError(
+          domain: "ExpoFaceRecognition", code: 20,
+          userInfo: [NSLocalizedDescriptionKey: "No camera frame available. Open the camera view first."]
+        )
+      }
+      guard let data = image.jpegData(compressionQuality: 0.85) else {
+        throw NSError(
+          domain: "ExpoFaceRecognition", code: 21,
+          userInfo: [NSLocalizedDescriptionKey: "Failed to encode frame as JPEG"]
+        )
+      }
+      let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("enroll_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
+      try data.write(to: url)
+      return url.absoluteString
+    }
+
     AsyncFunction("recognizeFaceAsync") { (imageUri: String) async throws -> [String: Any] in
       let image = try Self.loadImage(from: imageUri)
       let result = try await MobileFaceNetService.shared.recognize(image: image)

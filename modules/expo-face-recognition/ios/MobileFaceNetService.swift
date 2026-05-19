@@ -7,8 +7,35 @@ import Vision
 
 struct EnrolledFace: Codable {
   let name: String
-  let embedding: [Float]
+  var embeddings: [[Float]]
   let enrolledAt: TimeInterval
+
+  // Handles migration from old format that stored a single `embedding` field
+  init(from decoder: Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    name = try c.decode(String.self, forKey: .name)
+    enrolledAt = try c.decode(TimeInterval.self, forKey: .enrolledAt)
+    if let multi = try? c.decode([[Float]].self, forKey: .embeddings) {
+      embeddings = multi
+    } else if let single = try? c.decode([Float].self, forKey: .embedding) {
+      embeddings = [single]
+    } else {
+      embeddings = []
+    }
+  }
+
+  init(name: String, embeddings: [[Float]], enrolledAt: TimeInterval) {
+    self.name = name; self.embeddings = embeddings; self.enrolledAt = enrolledAt
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: CodingKeys.self)
+    try c.encode(name, forKey: .name)
+    try c.encode(embeddings, forKey: .embeddings)
+    try c.encode(enrolledAt, forKey: .enrolledAt)
+  }
+
+  enum CodingKeys: String, CodingKey { case name, embeddings, embedding, enrolledAt }
 }
 
 // MARK: - Recognition result
@@ -84,16 +111,36 @@ class MobileFaceNetService {
 
   // MARK: - Public API
 
+  /// Creates (or replaces) the enrolled entry for `name` with a single embedding from `image`.
   func enroll(image: UIImage, name: String) async throws -> Bool {
     guard let embedding = try await extractEmbedding(from: image) else { return false }
     queue.sync {
       enrolledFaces.removeAll { $0.name.lowercased() == name.lowercased() }
       enrolledFaces.append(
-        EnrolledFace(name: name, embedding: embedding, enrolledAt: Date().timeIntervalSince1970)
+        EnrolledFace(name: name, embeddings: [embedding], enrolledAt: Date().timeIntervalSince1970)
       )
       saveDatabase()
     }
-    NSLog("[MobileFaceNet] Enrolled '\(name)'. Total: \(enrolledFaces.count)")
+    NSLog("[MobileFaceNet] Enrolled '\(name)' (1 embedding). Total people: \(enrolledFaces.count)")
+    return true
+  }
+
+  /// Appends an additional embedding for an already-enrolled `name`.
+  /// If the person does not exist yet, creates a new entry.
+  func addEmbedding(image: UIImage, name: String) async throws -> Bool {
+    guard let embedding = try await extractEmbedding(from: image) else { return false }
+    queue.sync {
+      if let idx = enrolledFaces.firstIndex(where: { $0.name.lowercased() == name.lowercased() }) {
+        enrolledFaces[idx].embeddings.append(embedding)
+        NSLog("[MobileFaceNet] Added embedding for '\(name)'. Count: \(enrolledFaces[idx].embeddings.count)")
+      } else {
+        enrolledFaces.append(
+          EnrolledFace(name: name, embeddings: [embedding], enrolledAt: Date().timeIntervalSince1970)
+        )
+        NSLog("[MobileFaceNet] New entry for '\(name)' via addEmbedding.")
+      }
+      saveDatabase()
+    }
     return true
   }
 
@@ -105,7 +152,9 @@ class MobileFaceNetService {
 
   func listEnrolled() -> [[String: Any]] {
     queue.sync {
-      enrolledFaces.map { ["name": $0.name, "enrolledAt": $0.enrolledAt] }
+      enrolledFaces.map {
+        ["name": $0.name, "enrolledAt": $0.enrolledAt, "embeddingCount": $0.embeddings.count]
+      }
     }
   }
 
@@ -229,13 +278,16 @@ class MobileFaceNetService {
 
   // MARK: - Matching
 
+  /// Finds the enrolled person whose closest embedding is nearest to `query`.
   private func bestMatch(for query: [Float]) -> RecognitionResult {
     var bestName     = "Unknown"
     var bestDistance = Float.infinity
 
     for face in enrolledFaces {
-      let d = cosineDistance(query, face.embedding)
-      if d < bestDistance { bestDistance = d; bestName = face.name }
+      for emb in face.embeddings {
+        let d = cosineDistance(query, emb)
+        if d < bestDistance { bestDistance = d; bestName = face.name }
+      }
     }
 
     let found      = bestDistance < kMatchThreshold
