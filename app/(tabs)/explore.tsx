@@ -1,112 +1,273 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useCameraPermissions } from "expo-camera";
+import { Fragment, useRef, useState } from "react";
+import {
+  LayoutChangeEvent,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { Rect, Svg, Text as SvgText } from "react-native-svg";
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+import type { FacesDetectedPayload } from "@/modules/expo-face-recognition";
+import { ExpoFaceRecognitionView } from "@/modules/expo-face-recognition";
 
-export default function TabTwoScreen() {
+type LogEntry = {
+  id: number;
+  timestamp: string;
+  message: string;
+  isError?: boolean;
+};
+
+type ScreenBox = { left: number; top: number; width: number; height: number; name: string };
+
+/** Face coords are normalized 0–1 (mirrored + Y-flipped on native side).
+ *  Multiply directly by view dimensions. */
+function toScreenBox(
+  face: { x: number; y: number; width: number; height: number; name: string },
+  viewW: number,
+  viewH: number,
+): ScreenBox {
+  return {
+    left: face.x * viewW,
+    top: face.y * viewH,
+    width: face.width * viewW,
+    height: face.height * viewH,
+    name: face.name,
+  };
+}
+
+export default function ExploreScreen() {
+  const [permission, requestPermission] = useCameraPermissions();
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [faceCount, setFaceCount] = useState<number | null>(null);
+  const [faceBoxes, setFaceBoxes] = useState<ScreenBox[]>([]);
+
+  const viewSize = useRef({ width: 0, height: 0 });
+  const logIdRef = useRef(0);
+
+  const addLog = (message: string, isError = false) => {
+    const now = new Date();
+    const ts = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((n) => n.toString().padStart(2, "0"))
+      .join(":");
+    setLogs((prev) => [
+      { id: ++logIdRef.current, timestamp: ts, message, isError },
+      ...prev.slice(0, 49),
+    ]);
+  };
+
+  const handleLayout = (e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    viewSize.current = { width, height };
+  };
+
+  const handleFacesDetected = ({
+    nativeEvent,
+  }: {
+    nativeEvent: FacesDetectedPayload;
+  }) => {
+    const { faceCount: count, faces } = nativeEvent;
+    const { width: vw, height: vh } = viewSize.current;
+    setFaceCount(count);
+    setFaceBoxes(
+      vw > 0 && vh > 0 ? faces.map((f) => toScreenBox(f, vw, vh)) : [],
+    );
+
+    if (count > 0) {
+      addLog(`Detected ${count} face${count !== 1 ? "s" : ""}`);
+      faces.forEach((face, i) => {
+        addLog(
+          `  #${i + 1}  x=${face.x.toFixed(0)}  y=${face.y.toFixed(0)}  ${face.width.toFixed(0)}×${face.height.toFixed(0)}`,
+        );
+      });
+    }
+  };
+
+  if (!permission) return <View style={styles.root} />;
+
+  if (!permission.granted) {
+    return (
+      <View style={styles.root}>
+        <Text style={styles.message}>Camera access is required</Text>
+        <Pressable style={styles.btn} onPress={requestPermission}>
+          <Text style={styles.btnText}>Grant Permission</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
-        </ThemedText>
-      </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
-    </ParallaxScrollView>
+    <View style={styles.root} onLayout={handleLayout}>
+      <ExpoFaceRecognitionView
+        style={styles.camera}
+        onFacesDetected={handleFacesDetected}
+      />
+
+      {/* Face bounding boxes via SVG */}
+      <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+        {faceBoxes.map((box, i) => (
+          <Fragment key={i}>
+            <Rect
+              x={box.left}
+              y={box.top}
+              width={box.width}
+              height={box.height}
+              stroke="#ff3b30"
+              strokeWidth={2}
+              fill="none"
+              rx={4}
+            />
+            {box.name ? (
+              <SvgText
+                x={box.left + box.width / 2}
+                y={box.top - 8}
+                textAnchor="middle"
+                fill="#ff3b30"
+                fontSize={13}
+                fontWeight="bold"
+              >
+                {box.name}
+              </SvgText>
+            ) : null}
+          </Fragment>
+        ))}
+      </Svg>
+
+      {/* Live badge */}
+      {faceCount !== null && (
+        <View style={styles.badge} pointerEvents="none">
+          <View style={styles.badgeInner}>
+            <Text style={styles.badgeText}>
+              {faceCount > 0
+                ? `${faceCount} face${faceCount !== 1 ? "s" : ""}`
+                : "No face"}
+            </Text>
+          </View>
+        </View>
+      )}
+
+      {/* Log panel */}
+      <View style={styles.logPanel}>
+        <View style={styles.logHeader}>
+          <Text style={styles.logTitle}>Detection Log</Text>
+          {logs.length > 0 && (
+            <Pressable style={styles.clearBtn} onPress={() => setLogs([])}>
+              <Text style={styles.clearBtnText}>Clear</Text>
+            </Pressable>
+          )}
+        </View>
+
+        <ScrollView
+          style={styles.logScroll}
+          contentContainerStyle={styles.logContent}
+        >
+          {logs.length === 0 && (
+            <Text style={styles.logEmpty}>Waiting for faces…</Text>
+          )}
+          {logs.map((entry) => (
+            <View key={entry.id} style={styles.logRow}>
+              <Text style={styles.logTime}>{entry.timestamp}</Text>
+              <Text style={[styles.logMsg, entry.isError && styles.logError]}>
+                {entry.message}
+              </Text>
+            </View>
+          ))}
+        </ScrollView>
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
-    position: 'absolute',
+  root: {
+    flex: 1,
+    backgroundColor: "#000",
   },
-  titleContainer: {
-    flexDirection: 'row',
-    gap: 8,
+  camera: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
+  badge: {
+    position: "absolute",
+    top: 60,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+  },
+  badgeInner: {
+    backgroundColor: "rgba(0,0,0,0.55)",
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  badgeText: {
+    color: "#4ade80",
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  message: {
+    color: "#fff",
+    fontSize: 16,
+    marginBottom: 20,
+    textAlign: "center",
+    paddingHorizontal: 32,
+  },
+  logPanel: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 250,
+    backgroundColor: "rgba(0,0,0,0.84)",
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingTop: 12,
+    paddingHorizontal: 14,
+    paddingBottom: 28,
+  },
+  logHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  logTitle: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 14,
+    letterSpacing: 0.4,
+  },
+  clearBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 5,
+    borderRadius: 50,
+    borderWidth: 1,
+    borderColor: "#444",
+  },
+  clearBtnText: { color: "#888", fontSize: 13, fontWeight: "600" },
+  logScroll: { flex: 1 },
+  logContent: { gap: 3 },
+  logEmpty: { color: "#555", fontSize: 13, marginTop: 8 },
+  logRow: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
+  logTime: {
+    color: "#555",
+    fontSize: 11,
+    fontVariant: ["tabular-nums"],
+    marginTop: 1,
+  },
+  logMsg: { color: "#d4d4d4", fontSize: 13, flex: 1, fontFamily: "Courier" },
+  logError: { color: "#ff6b6b" },
+  btn: {
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    backgroundColor: "#fff",
+    borderRadius: 50,
+    alignItems: "center",
+  },
+  btnText: { color: "#000", fontWeight: "600", fontSize: 14 },
 });
