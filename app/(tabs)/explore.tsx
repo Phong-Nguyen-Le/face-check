@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { Rect, Svg, Text as SvgText } from "react-native-svg";
 
+import { faceToScreenRect } from "@/components/view/enroll/faceCoords";
 import type { FacesDetectedPayload } from "@/modules/expo-face-recognition";
 import { ExpoFaceRecognitionView } from "@/modules/expo-face-recognition";
 
@@ -20,20 +21,25 @@ type LogEntry = {
   isError?: boolean;
 };
 
-type ScreenBox = { left: number; top: number; width: number; height: number; name: string };
+type ScreenBox = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  name: string;
+};
 
-/** Face coords are normalized 0–1 (mirrored + Y-flipped on native side).
- *  Multiply directly by view dimensions. */
 function toScreenBox(
   face: { x: number; y: number; width: number; height: number; name: string },
   viewW: number,
   viewH: number,
 ): ScreenBox {
+  const r = faceToScreenRect(face, { width: viewW, height: viewH });
   return {
-    left: face.x * viewW,
-    top: face.y * viewH,
-    width: face.width * viewW,
-    height: face.height * viewH,
+    left: r.x,
+    top: r.y,
+    width: r.width,
+    height: r.height,
     name: face.name,
   };
 }
