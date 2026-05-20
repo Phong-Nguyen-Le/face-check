@@ -100,6 +100,29 @@ public class ExpoFaceRecognitionModule: Module {
       return ["success": ok, "name": name]
     }
 
+    /// Enrolls `name` using the ring-buffered camera frames (multi-frame averaged embedding).
+    /// Only use this during live camera enrollment — not for library images.
+    AsyncFunction("enrollFromCameraFramesAsync") { (name: String) async throws -> [String: Any] in
+      let frames = FrameStore.shared.takeAll()
+      guard !frames.isEmpty else {
+        throw NSError(domain: "ExpoFaceRecognition", code: 22,
+          userInfo: [NSLocalizedDescriptionKey: "No camera frames available."])
+      }
+      let ok = try await MobileFaceNetService.shared.enrollFromFrames(images: frames, name: name)
+      return ["success": ok, "name": name, "frameCount": frames.count]
+    }
+
+    /// Appends an averaged embedding for `name` from ring-buffered camera frames.
+    AsyncFunction("addEmbeddingFromCameraFramesAsync") { (name: String) async throws -> [String: Any] in
+      let frames = FrameStore.shared.takeAll()
+      guard !frames.isEmpty else {
+        throw NSError(domain: "ExpoFaceRecognition", code: 23,
+          userInfo: [NSLocalizedDescriptionKey: "No camera frames available."])
+      }
+      let ok = try await MobileFaceNetService.shared.addEmbeddingFromFrames(images: frames, name: name)
+      return ["success": ok, "name": name, "frameCount": frames.count]
+    }
+
     AsyncFunction("captureFrameAsync") { () async throws -> String in
       guard let image = FrameStore.shared.take() else {
         throw NSError(

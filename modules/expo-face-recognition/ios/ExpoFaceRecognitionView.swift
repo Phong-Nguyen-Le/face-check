@@ -197,22 +197,29 @@ class ExpoFaceRecognitionView: ExpoView, AVCaptureVideoDataOutputSampleBufferDel
   }
 }
 
-// MARK: - FrameStore (shared storage for captureFrameAsync)
+// MARK: - FrameStore (shared storage for captureFrameAsync and multi-frame enrollment)
 
 final class FrameStore {
   static let shared = FrameStore()
   private let lock = NSLock()
-  private var _image: UIImage?
+  private var _frames: [UIImage] = []
+  private let kCapacity = 5
 
   private init() {}
 
   func update(_ image: UIImage) {
     lock.lock(); defer { lock.unlock() }
-    _image = image
+    _frames.append(image)
+    if _frames.count > kCapacity { _frames.removeFirst() }
   }
 
   func take() -> UIImage? {
     lock.lock(); defer { lock.unlock() }
-    return _image
+    return _frames.last
+  }
+
+  func takeAll() -> [UIImage] {
+    lock.lock(); defer { lock.unlock() }
+    return _frames
   }
 }
