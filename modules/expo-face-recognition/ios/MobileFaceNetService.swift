@@ -298,31 +298,28 @@ class MobileFaceNetService {
 
   private func detectAlignAndCrop(cgImage: CGImage) async throws -> UIImage? {
     try await withCheckedThrowingContinuation { continuation in
-      // VNDetectFaceLandmarksRequest implicitly runs face rectangle detection first
       let request = VNDetectFaceLandmarksRequest { req, error in
         if let error { continuation.resume(throwing: error); return }
-
         guard let obs = req.results?.first as? VNFaceObservation else {
           continuation.resume(returning: nil); return
         }
 
-        let w = CGFloat(cgImage.width)
-        let h = CGFloat(cgImage.height)
+        let size = CGSize(width: cgImage.width, height: cgImage.height)
+
+        // Prefer full 5-point similarity warp → exact ArcFace 112×112 geometry
+        if let srcPts = Self.fiveLandmarks(from: obs, imageSize: size) {
+          continuation.resume(returning: Self.similarityAlignedCrop(cgImage: cgImage, src: srcPts))
+          return
+        }
+
+        // Fallback: rotate by eye angle + crop
         let bb = obs.boundingBox
-
-        // Vision bbox origin is bottom-left → flip Y to UIKit coords
-        var rect = CGRect(
-          x:      bb.minX * w,
-          y:      (1 - bb.maxY) * h,
-          width:  bb.width  * w,
-          height: bb.height * h
-        )
+        var rect = CGRect(x: bb.minX * size.width,  y: (1 - bb.maxY) * size.height,
+                          width: bb.width * size.width, height: bb.height * size.height)
         rect = rect.insetBy(dx: -rect.width * 0.2, dy: -rect.height * 0.2)
-          .intersection(CGRect(x: 0, y: 0, width: w, height: h))
-
-        let angle = Self.eyeAngle(from: obs, imageSize: CGSize(width: w, height: h))
-        let result = Self.rotateAndCrop(cgImage: cgImage, angle: angle, cropRect: rect)
-        continuation.resume(returning: result)
+                   .intersection(CGRect(origin: .zero, size: size))
+        let angle = Self.eyeAngle(from: obs, imageSize: size)
+        continuation.resume(returning: Self.rotateAndCrop(cgImage: cgImage, angle: angle, cropRect: rect))
       }
 
       let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
@@ -331,23 +328,134 @@ class MobileFaceNetService {
     }
   }
 
-  // Computes the tilt angle of the face from eye landmark positions (UIKit coords).
-  private static func eyeAngle(from obs: VNFaceObservation, imageSize: CGSize) -> CGFloat {
-    guard
-      let landmarks = obs.landmarks,
-      let leftEye   = landmarks.leftEye,
-      let rightEye  = landmarks.rightEye,
-      !leftEye.normalizedPoints.isEmpty,
-      !rightEye.normalizedPoints.isEmpty
-    else { return 0 }
+  // MARK: - 5-Point Similarity Alignment
 
+  // ArcFace / InsightFace reference landmark positions for a 112×112 aligned face.
+  private static let kAlignSize = CGSize(width: 112, height: 112)
+  private static let kRefLandmarks: [(CGFloat, CGFloat)] = [
+    (38.2946, 51.6963),  // left eye
+    (73.5318, 51.5014),  // right eye
+    (56.0252, 71.7366),  // nose tip
+    (41.5493, 92.3655),  // left mouth corner
+    (70.7299, 92.2041),  // right mouth corner
+  ]
+
+  /// Returns 5 landmark positions in UIKit pixel coordinates, or nil if any are missing.
+  private static func fiveLandmarks(from obs: VNFaceObservation, imageSize: CGSize) -> [(CGFloat, CGFloat)]? {
+    guard let lm = obs.landmarks else { return nil }
+
+    guard let leftPt  = landmarkCenterTuple(lm.leftPupil  ?? lm.leftEye,  obs: obs, size: imageSize),
+          let rightPt = landmarkCenterTuple(lm.rightPupil ?? lm.rightEye, obs: obs, size: imageSize)
+    else { return nil }
+
+    // Nose tip: last point of noseCrest (bridge → tip)
+    let nosePt: (CGFloat, CGFloat)?
+    if let crest = lm.noseCrest, let last = crest.normalizedPoints.last {
+      let p = landmarkCenter([last], bb: obs.boundingBox, size: imageSize)
+      nosePt = (p.x, p.y)
+    } else if let nose = lm.nose, !nose.normalizedPoints.isEmpty {
+      let p = landmarkCenter(nose.normalizedPoints, bb: obs.boundingBox, size: imageSize)
+      nosePt = (p.x, p.y)
+    } else { nosePt = nil }
+    guard let nose = nosePt else { return nil }
+
+    // Mouth corners: leftmost and rightmost points of outerLips
+    guard let lips = lm.outerLips, !lips.normalizedPoints.isEmpty else { return nil }
+    let lipPts = lips.normalizedPoints.map { landmarkCenter([$0], bb: obs.boundingBox, size: imageSize) }
+    guard let lMouth = lipPts.min(by: { $0.x < $1.x }),
+          let rMouth = lipPts.max(by: { $0.x < $1.x }) else { return nil }
+
+    return [leftPt, rightPt, nose,
+            (lMouth.x, lMouth.y), (rMouth.x, rMouth.y)]
+  }
+
+  private static func landmarkCenterTuple(
+    _ region: VNFaceLandmarkRegion2D?, obs: VNFaceObservation, size: CGSize
+  ) -> (CGFloat, CGFloat)? {
+    guard let r = region, !r.normalizedPoints.isEmpty else { return nil }
+    let p = landmarkCenter(r.normalizedPoints, bb: obs.boundingBox, size: size)
+    return (p.x, p.y)
+  }
+
+  /// Warps `cgImage` so the 5 detected `src` landmarks align to `kRefLandmarks`
+  /// using a least-squares similarity transform, producing a 112×112 output.
+  private static func similarityAlignedCrop(cgImage: CGImage, src: [(CGFloat, CGFloat)]) -> UIImage? {
+    let dst = kRefLandmarks
+    let N   = CGFloat(src.count)
+
+    var Cx: CGFloat = 0, Cy: CGFloat = 0
+    var CxP: CGFloat = 0, CyP: CGFloat = 0
+    var W: CGFloat = 0, sumA: CGFloat = 0, sumB: CGFloat = 0
+
+    for i in 0..<src.count {
+      let (xi, yi)   = src[i]
+      let (xip, yip) = dst[i]
+      Cx += xi;  Cy += yi
+      CxP += xip; CyP += yip
+      W    += xi*xi + yi*yi
+      sumA += xi*xip + yi*yip
+      sumB += xi*yip - yi*xip
+    }
+
+    let D = N * W - Cx*Cx - Cy*Cy
+    guard abs(D) > 1e-6 else { return nil }
+
+    let a  = (N * sumA - Cx * CxP - Cy * CyP) / D
+    let b  = (N * sumB - Cx * CyP + Cy * CxP) / D
+    let tx = (CxP - a * Cx + b * Cy) / N
+    let ty = (CyP - b * Cx - a * Cy) / N
+
+    // CGAffineTransform: x' = cg.a·x + cg.c·y + cg.tx
+    //                    y' = cg.b·x + cg.d·y + cg.ty
+    // Similarity:        x' =  a·x   - b·y   + tx
+    //                    y' =  b·x   + a·y   + ty
+    let transform = CGAffineTransform(a: a, b: b, c: -b, d: a, tx: tx, ty: ty)
+
+    UIGraphicsBeginImageContextWithOptions(kAlignSize, false, 1.0)
+    defer { UIGraphicsEndImageContext() }
+    guard let ctx = UIGraphicsGetCurrentContext() else { return nil }
+
+    ctx.concatenate(transform)
+    UIImage(cgImage: cgImage).draw(
+      in: CGRect(origin: .zero, size: CGSize(width: cgImage.width, height: cgImage.height))
+    )
+    return UIGraphicsGetImageFromCurrentImageContext()
+  }
+
+  // MARK: - Eye-angle fallback helpers
+
+  private static func eyeAngle(from obs: VNFaceObservation, imageSize: CGSize) -> CGFloat {
+    guard let lm = obs.landmarks,
+          let leftEye  = lm.leftEye,  !leftEye.normalizedPoints.isEmpty,
+          let rightEye = lm.rightEye, !rightEye.normalizedPoints.isEmpty
+    else { return 0 }
     let lc = landmarkCenter(leftEye.normalizedPoints,  bb: obs.boundingBox, size: imageSize)
     let rc = landmarkCenter(rightEye.normalizedPoints, bb: obs.boundingBox, size: imageSize)
     return atan2(rc.y - lc.y, rc.x - lc.x)
   }
 
-  // Converts Vision landmark points (normalized in bounding-box space, origin bottom-left)
-  // to UIKit image pixel coordinates (origin top-left).
+  // Rotates the full image around the face centre, then crops.
+  private static func rotateAndCrop(cgImage: CGImage, angle: CGFloat, cropRect: CGRect) -> UIImage? {
+    guard abs(angle) > 0.017 else {
+      guard let cropped = cgImage.cropping(to: cropRect) else { return nil }
+      return UIImage(cgImage: cropped)
+    }
+    let size  = CGSize(width: cgImage.width, height: cgImage.height)
+    let pivot = CGPoint(x: cropRect.midX, y: cropRect.midY)
+    UIGraphicsBeginImageContextWithOptions(size, false, 1.0)
+    defer { UIGraphicsEndImageContext() }
+    guard let ctx = UIGraphicsGetCurrentContext() else { return nil }
+    ctx.translateBy(x: pivot.x, y: pivot.y)
+    ctx.rotate(by: -angle)
+    ctx.translateBy(x: -pivot.x, y: -pivot.y)
+    UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: size))
+    guard let rotatedCG = UIGraphicsGetImageFromCurrentImageContext()?.cgImage else { return nil }
+    guard let cropped   = rotatedCG.cropping(to: cropRect) else { return nil }
+    return UIImage(cgImage: cropped)
+  }
+
+  // Converts Vision landmark points (normalised in bounding-box space, origin bottom-left)
+  // to UIKit image pixel coordinates (origin top-left, Y down).
   private static func landmarkCenter(_ pts: [CGPoint], bb: CGRect, size: CGSize) -> CGPoint {
     let n  = CGFloat(pts.count)
     let sx = pts.reduce(0.0) { $0 + $1.x }
@@ -356,34 +464,6 @@ class MobileFaceNetService {
       x: (bb.minX + (sx / n) * bb.width)  * size.width,
       y: (1.0 - (bb.minY + (sy / n) * bb.height)) * size.height
     )
-  }
-
-  // Rotates the full image by -angle around the face center (cropRect.mid), then crops.
-  // Skips rotation for angles < 1° to avoid unnecessary work.
-  private static func rotateAndCrop(cgImage: CGImage, angle: CGFloat, cropRect: CGRect) -> UIImage? {
-    guard abs(angle) > 0.017 else {   // < ~1°: skip rotation
-      guard let cropped = cgImage.cropping(to: cropRect) else { return nil }
-      return UIImage(cgImage: cropped)
-    }
-
-    let size  = CGSize(width: cgImage.width, height: cgImage.height)
-    let pivot = CGPoint(x: cropRect.midX, y: cropRect.midY)
-
-    UIGraphicsBeginImageContextWithOptions(size, false, 1.0)
-    defer { UIGraphicsEndImageContext() }
-    guard let ctx = UIGraphicsGetCurrentContext() else { return nil }
-
-    // Rotate the drawing context around the face pivot so eyes become horizontal.
-    // In a UIKit context positive ctx.rotate = CCW in standard math = CW on screen.
-    // We need CW rotation on screen → use -angle.
-    ctx.translateBy(x: pivot.x, y: pivot.y)
-    ctx.rotate(by: -angle)
-    ctx.translateBy(x: -pivot.x, y: -pivot.y)
-    UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: size))
-
-    guard let rotatedCG = UIGraphicsGetImageFromCurrentImageContext()?.cgImage else { return nil }
-    guard let cropped   = rotatedCG.cropping(to: cropRect) else { return nil }
-    return UIImage(cgImage: cropped)
   }
 
   // MARK: - Matching
